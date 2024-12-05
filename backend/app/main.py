@@ -32,6 +32,10 @@ class TaskBase(BaseModel):
     description: Optional[str] = None
     due_date: Optional[datetime] = None
     priority: Optional[str] = "Medium"
+    category: Optional[str] = None
+    tags: Optional[List[str]] = []
+    progress: Optional[int] = 0  # Progress percentage (0-100)
+    notes: Optional[List[str]] = []
 
 class TaskCreate(TaskBase):
     pass
@@ -60,12 +64,19 @@ async def generate_tasks(prompt: str = Body(...), db: Session = Depends(database
                 - title (string): A short, clear title
                 - description (string): A detailed description
                 - priority (string): Must be exactly "Low", "Medium", or "High"
+                - category (string): A relevant category for the task (e.g., "Work", "Personal", "Shopping", "Health", etc.)
+                - tags (array of strings): Relevant tags for the task
+                - due_date (string, optional): Suggested due date in ISO format (YYYY-MM-DD)
+                
                 Example format:
                 [
                     {
                         "title": "Book flight tickets",
-                        "description": "Search and book round-trip flights",
-                        "priority": "High"
+                        "description": "Search and book round-trip flights to Paris",
+                        "priority": "High",
+                        "category": "Travel",
+                        "tags": ["vacation", "booking", "transportation"],
+                        "due_date": "2024-03-15"
                     }
                 ]"""},
                 {"role": "user", "content": prompt}
@@ -85,6 +96,14 @@ async def generate_tasks(prompt: str = Body(...), db: Session = Depends(database
                 # Validate priority
                 if task_data["priority"] not in ["Low", "Medium", "High"]:
                     task_data["priority"] = "Medium"
+                
+                # Convert due_date string to datetime if present
+                if "due_date" in task_data and task_data["due_date"]:
+                    try:
+                        task_data["due_date"] = datetime.fromisoformat(task_data["due_date"])
+                    except ValueError:
+                        task_data["due_date"] = None
+                
                 tasks.append(TaskCreate(**task_data))
             return tasks
         except json.JSONDecodeError:
@@ -120,3 +139,120 @@ def complete_task(task_id: int, db: Session = Depends(database.get_db)):
     task.is_completed = not task.is_completed
     db.commit()
     return {"status": "success"}
+
+@app.get("/tasks/categories")
+def get_categories(db: Session = Depends(database.get_db)):
+    """Get all unique categories from existing tasks"""
+    tasks = db.query(models.Task).all()
+    categories = set(task.category for task in tasks if task.category)
+    return list(categories)
+
+@app.get("/tasks/search")
+def search_tasks(
+    q: Optional[str] = None,
+    category: Optional[str] = None,
+    priority: Optional[str] = None,
+    completed: Optional[bool] = None,
+    db: Session = Depends(database.get_db)
+):
+    """Search tasks with various filters"""
+    query = db.query(models.Task)
+    
+    if q:
+        query = query.filter(
+            (models.Task.title.ilike(f"%{q}%")) |
+            (models.Task.description.ilike(f"%{q}%"))
+        )
+    if category:
+        query = query.filter(models.Task.category == category)
+    if priority:
+        query = query.filter(models.Task.priority == priority)
+    if completed is not None:
+        query = query.filter(models.Task.is_completed == completed)
+        
+    return query.all()
+
+@app.post("/tasks/{task_id}/notes")
+def add_task_note(
+    task_id: int,
+    note: str = Body(...),
+    db: Session = Depends(database.get_db)
+):
+    """Add a note to a task"""
+    task = db.query(models.Task).filter(models.Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    if not task.notes:
+        task.notes = []
+    task.notes.append(note)
+    db.commit()
+    return {"status": "success"}
+
+@app.put("/tasks/{task_id}/progress")
+def update_task_progress(
+    task_id: int,
+    progress: int = Body(...),
+    db: Session = Depends(database.get_db)
+):
+    """Update task progress percentage"""
+    if not 0 <= progress <= 100:
+        raise HTTPException(status_code=400, detail="Progress must be between 0 and 100")
+        
+    task = db.query(models.Task).filter(models.Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    task.progress = progress
+    db.commit()
+    return {"status": "success"}
+
+@app.get("/tasks/{task_id}/assistance")
+async def get_task_assistance(task_id: int, db: Session = Depends(database.get_db)):
+    """Get AI-generated assistance and resources for completing a task"""
+    task = db.query(models.Task).filter(models.Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": """You are a helpful task assistant. Provide practical suggestions, 
+                resources, and steps for completing the given task. Include:
+                1. A brief step-by-step guide
+                2. Useful online resources (websites, tools, apps)
+                3. Tips and best practices
+                4. Estimated time to complete
+                
+                Format your response as JSON with the following structure:
+                {
+                    "steps": [{"step": 1, "description": "..."}],
+                    "resources": [{"title": "...", "url": "...", "description": "..."}],
+                    "tips": ["..."],
+                    "estimated_time": "... (e.g., '2 hours', '3 days')",
+                    "difficulty_level": "Easy|Medium|Hard"
+                }"""},
+                {"role": "user", "content": f"Provide assistance for the task: {task.title}\nDescription: {task.description or ''}"}
+            ],
+            temperature=0.7,
+        )
+        
+        response = completion.choices[0].message.content
+        
+        # Parse the JSON response
+        import json
+        try:
+            assistance_data = json.loads(response)
+            return assistance_data
+        except json.JSONDecodeError:
+            return {
+                "steps": [{"step": 1, "description": response}],
+                "resources": [],
+                "tips": [],
+                "estimated_time": "Unknown",
+                "difficulty_level": "Medium"
+            }
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
