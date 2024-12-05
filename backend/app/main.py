@@ -1,9 +1,9 @@
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, Body
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
-import openai
+from openai import OpenAI
 from pydantic import BaseModel
 import os
 from dotenv import load_dotenv
@@ -13,7 +13,7 @@ from . import models, database
 load_dotenv()
 
 app = FastAPI()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Configure CORS
 app.add_middleware(
@@ -47,9 +47,12 @@ class Task(TaskBase):
         from_attributes = True
 
 @app.post("/tasks/generate", response_model=List[TaskBase])
-async def generate_tasks(prompt: str, db: Session = Depends(database.get_db)):
+async def generate_tasks(prompt: str = Body(...), db: Session = Depends(database.get_db)):
+    if not prompt or not isinstance(prompt, str):
+        raise HTTPException(status_code=422, detail="Invalid prompt format. Expected a string.")
+        
     try:
-        completion = openai.ChatCompletion.create(
+        completion = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": """You are a helpful task planner. Create a list of specific, actionable tasks based on the user's input.

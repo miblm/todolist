@@ -30,11 +30,32 @@ export default function Home() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify(prompt),
       });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
       const generatedTasks = await response.json();
-      setTasks([...tasks, ...generatedTasks]);
-      setPrompt('');
+      if (Array.isArray(generatedTasks)) {
+        for (const task of generatedTasks) {
+          const saveResponse = await fetch('http://localhost:8000/tasks/', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(task),
+          });
+          if (saveResponse.ok) {
+            const savedTask = await saveResponse.json();
+            setTasks(prevTasks => [...prevTasks, savedTask]);
+          }
+        }
+        setPrompt('');
+      } else {
+        console.error('Unexpected response format:', generatedTasks);
+      }
     } catch (error) {
       console.error('Error generating tasks:', error);
     } finally {
