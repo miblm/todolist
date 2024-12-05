@@ -281,3 +281,78 @@ def delete_task(task_id: int, db: Session = Depends(database.get_db)):
     db.delete(db_task)
     db.commit()
     return {"status": "success"}
+
+@app.post("/tasks/{task_id}/subtasks", response_model=List[Task])
+async def create_subtasks(task_id: int, db: Session = Depends(database.get_db)):
+    """Generate and create subtasks for a given task"""
+    parent_task = db.query(models.Task).filter(models.Task.id == task_id).first()
+    if not parent_task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    try:
+        # Use OpenAI to generate subtasks
+        completion = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": """You are a task breakdown expert. Break down the given task into smaller, 
+                manageable subtasks. Each subtask should be specific and actionable.
+                Format your response as a JSON array of tasks, where each task has:
+                - title (string): A clear, concise title
+                - description (string): A detailed description
+                - priority (string): Must be exactly "Low", "Medium", or "High"
+                
+                Example format:
+                [
+                    {
+                        "title": "Research flight options",
+                        "description": "Compare prices and schedules from different airlines",
+                        "priority": "High"
+                    }
+                ]"""},
+                {"role": "user", "content": f"Break down this task into subtasks: {parent_task.title}\nDescription: {parent_task.description or ''}"}
+            ],
+            temperature=0.7,
+        )
+        
+        response = completion.choices[0].message.content
+        
+        # Parse the JSON response and create subtasks
+        import json
+        try:
+            subtasks_data = json.loads(response)
+            created_subtasks = []
+            
+            for subtask_data in subtasks_data:
+                # Inherit certain properties from parent
+                subtask_data["category"] = parent_task.category
+                subtask_data["due_date"] = parent_task.due_date
+                subtask_data["owner_id"] = parent_task.owner_id
+                subtask_data["parent_id"] = parent_task.id
+                
+                # Create the subtask
+                db_subtask = models.Task(**subtask_data)
+                db.add(db_subtask)
+                created_subtasks.append(db_subtask)
+            
+            db.commit()
+            
+            # Refresh all subtasks to get their IDs
+            for subtask in created_subtasks:
+                db.refresh(subtask)
+            
+            return created_subtasks
+            
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=500, detail="Failed to parse AI response")
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/tasks/{task_id}/subtasks", response_model=List[Task])
+def get_subtasks(task_id: int, db: Session = Depends(database.get_db)):
+    """Get all subtasks for a given task"""
+    task = db.query(models.Task).filter(models.Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    return task.subtasks
