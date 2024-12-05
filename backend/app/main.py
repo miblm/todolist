@@ -256,3 +256,28 @@ async def get_task_assistance(task_id: int, db: Session = Depends(database.get_d
             
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/tasks/{task_id}", response_model=Task)
+def update_task(task_id: int, task_update: TaskCreate, db: Session = Depends(database.get_db)):
+    """Update an existing task"""
+    db_task = db.query(models.Task).filter(models.Task.id == task_id).first()
+    if not db_task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    for field, value in task_update.dict(exclude_unset=True).items():
+        setattr(db_task, field, value)
+    
+    db.commit()
+    db.refresh(db_task)
+    return db_task
+
+@app.delete("/tasks/{task_id}")
+def delete_task(task_id: int, db: Session = Depends(database.get_db)):
+    """Delete a task"""
+    db_task = db.query(models.Task).filter(models.Task.id == task_id).first()
+    if not db_task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    db.delete(db_task)
+    db.commit()
+    return {"status": "success"}
